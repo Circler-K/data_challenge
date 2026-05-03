@@ -28,6 +28,11 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Generated viewing artifacts (regeneratable via python -m src.export_view)
+outputs/csv/
+outputs/plots/Train*_Vibration/
+outputs/export_view_run.log
+
 # Editor
 .vscode/
 .idea/
