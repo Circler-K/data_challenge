@@ -1,14 +1,31 @@
 """TDMS I/O for KSPHM-KIMM 2026 vibration data.
 
-Each file holds 1 minute of 4-channel vibration at 25.6 kHz, stored as
-sequential float32 blocks per channel under the group ``Vibration``.
+Each file holds 1 minute of 4-channel vibration at 25.6 kHz, stored under
+the group ``Vibration`` with channels ``CH1..CH4``.
+
+Standard usage (per challenge guide):
+
+    from nptdms import TdmsFile
+    import pandas as pd
+
+    def load_tdms_file(file_path):
+        tdms_file = TdmsFile.read(file_path)
+        df = tdms_file.as_dataframe()
+        return df
+
+This module wraps that pattern and adds a small helper for code paths that
+need a NumPy ``(4, N)`` matrix layout (e.g. signal-processing pipelines).
+
+Install nptdms with either:
+    conda install conda-forge::nptdms
+    pip install nptdms
 """
 from __future__ import annotations
 
-import struct
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from nptdms import TdmsFile
 
 FS = 25_600
@@ -19,33 +36,29 @@ CHANNEL_NAMES = ("CH1", "CH2", "CH3", "CH4")
 GROUP_NAME = "Vibration"
 
 
-def read_tdms(path: str | Path) -> np.ndarray:
-    """Load a TDMS file as ``(4, 1_536_000)`` float32 array via nptdms."""
-    with TdmsFile.open(str(path)) as tf:
-        group = tf[GROUP_NAME]
-        out = np.empty((N_CHANNELS, SAMPLES_PER_CH), dtype=np.float32)
-        for i, name in enumerate(CHANNEL_NAMES):
-            data = group[name][:]
-            out[i, : len(data)] = data
-    return out
+def load_tdms_file(file_path: str | Path) -> pd.DataFrame:
+    """Load a TDMS file as a pandas DataFrame (one column per channel)."""
+    tdms_file = TdmsFile.read(str(file_path))
+    df = tdms_file.as_dataframe()
+    return df
 
 
-def read_tdms_raw(path: str | Path) -> np.ndarray:
-    """Fast binary reader bypassing nptdms.
+def tdms_to_array(df: pd.DataFrame,
+                  channels: tuple[str, ...] = CHANNEL_NAMES) -> np.ndarray:
+    """Convert the DataFrame returned by ``load_tdms_file`` to a ``(C, N)``
+    float32 NumPy array in the order given by ``channels``.
 
-    Assumes the layout confirmed via the EDA: ToC=0x0E (no interleaving),
-    metadata block size = 225 bytes, and channels concatenated as
-    ``[CH1 | CH2 | CH3 | CH4]`` little-endian float32. Used to cross-check
-    nptdms output and to speed up bulk feature extraction if needed.
+    nptdms names columns like ``/'Vibration'/'CH1'`` — we match by suffix so
+    minor format variations are tolerated.
     """
-    with open(path, "rb") as fp:
-        header = fp.read(28)
-        tag, _toc, _ver, _next_off, data_off = struct.unpack("<4sIIQQ", header)
-        if tag != b"TDSm":
-            raise ValueError(f"Not a TDMS file: {path}")
-        fp.read(data_off)
-        raw = fp.read(SAMPLES_PER_CH * N_CHANNELS * 4)
-    return np.frombuffer(raw, dtype="<f4").reshape(N_CHANNELS, SAMPLES_PER_CH)
+    cols = []
+    for ch in channels:
+        match = [c for c in df.columns if c.endswith(f"'{ch}'") or c.endswith(f"/{ch}")]
+        if not match:
+            raise KeyError(f"channel {ch!r} not found in {list(df.columns)}")
+        cols.append(match[0])
+    arr = df[cols].to_numpy(dtype=np.float32, copy=False).T
+    return arr
 
 
 def time_axis(n_samples: int = SAMPLES_PER_CH, fs: int = FS) -> np.ndarray:
@@ -67,11 +80,9 @@ if __name__ == "__main__":
     test_path = sys.argv[1] if len(sys.argv) > 1 else (
         "c:/Users/User/WorkSpace/data_challenge/Train/Train1_Vibration/000001.tdms"
     )
-    a = read_tdms(test_path)
-    b = read_tdms_raw(test_path)
-    rms_a = np.sqrt((a ** 2).mean(axis=1))
-    rms_b = np.sqrt((b ** 2).mean(axis=1))
-    print(f"shape: {a.shape}, dtype: {a.dtype}")
-    print(f"nptdms RMS:  {rms_a}")
-    print(f"raw    RMS:  {rms_b}")
-    print(f"max abs diff: {np.max(np.abs(a - b)):.3e}")
+    df = load_tdms_file(test_path)
+    print(f"DataFrame shape: {df.shape}")
+    print(f"columns: {list(df.columns)}")
+    arr = tdms_to_array(df)
+    print(f"matrix shape: {arr.shape}, dtype: {arr.dtype}")
+    print(f"per-channel RMS: {np.sqrt((arr**2).mean(axis=1))}")

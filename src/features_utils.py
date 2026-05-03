@@ -35,7 +35,8 @@ from src.io_tdms import (
     FS,
     SAMPLES_PER_CH,
     CHANNEL_NAMES,
-    read_tdms_raw,
+    load_tdms_file,
+    tdms_to_array,
     file_start_seconds,
 )
 from src.operation import (
@@ -161,7 +162,7 @@ def per_train_bands(train_id: int, root: Path = DATA_ROOT,
     if use_idx is None:
         # Pick a file ~95% through life (avoid the very last in case it post-failure noise dominates)
         use_idx = max(0, int(len(files) * 0.92) - 1)
-    arr = read_tdms_raw(files[use_idx])
+    arr = tdms_to_array(load_tdms_file(files[use_idx]))
     bands: dict[str, tuple[float, float, dict]] = {}
     for i, ch in enumerate(CHANNEL_NAMES):
         lo, hi, info = select_envelope_band(arr[i])
@@ -188,7 +189,7 @@ def build_train_features(train_id: int, root: Path = DATA_ROOT,
     rows = []
     t0 = time.time()
     for i, path in enumerate(files, start=1):
-        arr = read_tdms_raw(path)
+        arr = tdms_to_array(load_tdms_file(path))
         rpm = op_agg.loc[op_agg.file_idx == i, "rpm_mean"].iloc[0]
         row: dict = dict(
             train_id=train_id,
