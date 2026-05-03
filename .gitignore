@@ -1,0 +1,33 @@
+# Raw challenge data — too large for git, downloaded from KIMM data platform
+Train/
+
+# HTML page assets — JS/CSS bundles snapshot, regeneratable from challenge URL
+KSPHM-KIMM 기계 데이터 챌린지 2026_files/
+
+# Tutorial notebooks and CWRU sample data shipped with utils — not part of pipeline
+utils/a_FFT.ipynb
+utils/b_Filtering.ipynb
+utils/c_Time_frequency.ipynb
+utils/d_Envelope.ipynb
+utils/e_Feature_CWRU_DE_IR.ipynb
+utils/f_Time_frequency_advanced.ipynb
+utils/g_deconvolution.ipynb
+utils/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
