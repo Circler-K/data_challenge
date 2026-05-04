@@ -1,20 +1,24 @@
-"""Regenerate EDA figures with clearer per-Train layouts.
+"""Regenerate EDA figures with the kurtogram → bandpass → envelope pipeline.
 
-Per user feedback: early/late + BPFI/BPFO/BSF on a single envelope panel
-overlapped too much. Each plot is now split so signals don't compete:
+Diagnostic pipeline (also documented in notebooks/00_walkthrough.ipynb 8.3):
+  1. fast_kurtogram identifies the band where impulses are strongest (per channel)
+  2. Apply that bandpass — discards low-freq mechanical noise + line interference
+  3. Hilbert envelope extracts the amplitude modulation
+  4. FFT of envelope reveals modulation frequencies
+  5. Compare with BPFI/BPFO/BSF (scaled to running rpm) to identify fault location
 
+Outputs:
   outputs/figures/03_Train{1..4}.png    (4 files, one per Train)
       4 rows (CH1..CH4) x 4 cols
         col 0: waveform 1 s            — early(blue) + late(red) overlay
-        col 1: |FFT| 5-5000 Hz log-y   — early + late overlay
-        col 2: envelope spec EARLY     — blue + BPFI/BPFO/BSF shaded bands
-        col 3: envelope spec LATE      — red  + BPFI/BPFO/BSF shaded bands
+        col 1: |FFT| 5-13000 Hz log-y  — kurtogram band overlaid (yellow span)
+        col 2: envelope spec EARLY     — blue, kurtogram-bandpassed
+        col 3: envelope spec LATE      — red,  kurtogram-bandpassed
+      Each channel uses its own kurtogram-derived bandpass (or [1000, 10000]
+      Hz fallback if kurtogram returned a degenerate band).
 
   outputs/figures/04_failure_summary.png  (1 file)
-      2 rows (early on top, late on bottom) x 4 cols (Trains).
-      Failure channel only:
-          Train1=CH2, Train2=CH3, Train3=CH1, Train4=CH4
-      BPFx as shaded bands with text labels.
+      2 rows (early on top, late on bottom) x 4 cols (Trains), failure channel.
 
 Run:  python -m src.regen_figures
 """
@@ -24,6 +28,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import butter, sosfiltfilt, hilbert
 
@@ -35,9 +40,10 @@ if str(ROOT / "utils") not in sys.path:
 
 from src.io_tdms import FS, CHANNEL_NAMES, load_tdms_file, tdms_to_array
 from src.operation import list_vibration_files, load_operation, align_to_vibration
-from src.features_utils import BPFx_AT_1000
+from src.features_utils import BPFx_AT_1000, KURT_FALLBACK_BAND
 
 FIG_DIR = ROOT / "outputs" / "figures"
+BANDS_CSV = ROOT / "outputs" / "features_utils" / "selected_bands.csv"
 TRAIN_IDS = (1, 2, 3, 4)
 FAILURE_SIDE = {1: "Front", 2: "Rear", 3: "Front", 4: "Rear"}
 # Top Spearman ρ vs life_frac (from feature analysis)
@@ -46,6 +52,23 @@ CH_INDEX = {ch: i for i, ch in enumerate(CHANNEL_NAMES)}
 
 # Color scheme for BPFx markers (also used as legend labels)
 BPFX_COLORS = {"BPFI": "tab:green", "BPFO": "tab:purple", "BSF": "tab:gray"}
+KURT_BAND_COLOR = "gold"  # color for the kurtogram-selected bandpass region
+
+
+def load_kurtogram_bands() -> dict:
+    """Return {(train_str, channel): (lo, hi)} from selected_bands.csv.
+
+    Falls back to [1000, 10000] Hz when the CSV says fallback=True.
+    """
+    df = pd.read_csv(BANDS_CSV)
+    bands: dict = {}
+    for _, row in df.iterrows():
+        if bool(row["fallback"]):
+            lo, hi = KURT_FALLBACK_BAND
+        else:
+            lo, hi = float(row["lo"]), float(row["hi"])
+        bands[(str(row["train"]), str(row["channel"]))] = (lo, hi)
+    return bands
 
 
 def get_endpoints(tr: int):
@@ -54,11 +77,18 @@ def get_endpoints(tr: int):
     agg = align_to_vibration(op, len(files))
     early = tdms_to_array(load_tdms_file(files[0]))
     late = tdms_to_array(load_tdms_file(files[-1]))
+    rpm_early = float(agg["rpm_mean"].iloc[0])
     rpm_late = float(agg["rpm_mean"].iloc[-1])
-    return early, late, rpm_late
+    return early, late, rpm_early, rpm_late
+
+
+def _make_sos(lo: float, hi: float):
+    """Build a Butterworth bandpass SOS for the envelope detection step."""
+    return butter(4, [lo, hi], btype="band", fs=FS, output="sos")
 
 
 def _envelope_spec(sig: np.ndarray, sos):
+    """Bandpass → Hilbert envelope → mean-subtract → windowed FFT."""
     env = np.abs(hilbert(sosfiltfilt(sos, sig)))
     env = env - env.mean()
     spec = np.abs(np.fft.rfft(env * np.hanning(len(env))))
@@ -91,22 +121,27 @@ def _bpfx_legend_handles():
             for n in ("BPFI", "BPFO", "BSF")]
 
 
-def fig03_per_train(endpoints):
+def fig03_per_train(endpoints, kurt_bands):
     """4 figures, one per Train. 4 rows (channels) x 4 cols.
 
-    cols: waveform | FFT | envelope-early | envelope-late
+    cols: waveform | FFT (with kurtogram band) | envelope-early | envelope-late
+
+    Each channel uses its own kurtogram-derived bandpass for envelope detection.
     """
-    sos = butter(4, [1000.0, 10000.0], btype="band", fs=FS, output="sos")
     n_show = FS  # 1 s
     t = np.arange(n_show) / FS
 
     for tr in TRAIN_IDS:
-        early, late, rpm_late = endpoints[tr]
-        scale = max(rpm_late, 100.0) / 1000.0
+        early, late, rpm_early, rpm_late = endpoints[tr]
+        scale_early = max(rpm_early, 100.0) / 1000.0
+        scale_late  = max(rpm_late,  100.0) / 1000.0
 
         fig, axes = plt.subplots(4, 4, figsize=(22, 14))
 
         for i, ch in enumerate(CHANNEL_NAMES):
+            lo, hi = kurt_bands[(f"Train{tr}", ch)]
+            sos = _make_sos(lo, hi)
+
             # ------------- Col 0: waveform 1 s -------------
             ax = axes[i, 0]
             ax.plot(t, early[i, :n_show], color="tab:blue",
@@ -121,19 +156,33 @@ def fig03_per_train(endpoints):
             if i == 3:
                 ax.set_xlabel("time [s]")
 
-            # ------------- Col 1: |FFT| 5-5000 Hz -------------
+            # ------------- Col 1: |FFT| 5-13000 Hz with kurtogram band -------------
             ax = axes[i, 1]
+            ax.axvspan(lo, hi, color=KURT_BAND_COLOR, alpha=0.35,
+                       lw=0, zorder=0)
             for sig, lbl, color in [(early[i], "early", "tab:blue"),
                                     (late[i],  "late",  "tab:red")]:
                 spec = np.abs(np.fft.rfft(sig * np.hanning(len(sig))))
                 freqs = np.fft.rfftfreq(len(sig), d=1.0 / FS)
-                m = (freqs >= 5) & (freqs <= 5000)
+                m = (freqs >= 5) & (freqs <= 13000)
                 ax.semilogy(freqs[m], spec[m] + 1e-3,
                             color=color, lw=0.45, alpha=0.85, label=lbl)
+            ax.set_xlim(5, 13000)
             ax.set_ylabel("|FFT|")
             ax.grid(alpha=0.3)
             if i == 0:
-                ax.set_title("(b) FFT 5-5000 Hz (log)", fontsize=12)
+                from matplotlib.patches import Patch
+                handles = [Patch(facecolor=KURT_BAND_COLOR, alpha=0.5,
+                                 label=f"kurtogram band [{lo:.0f}, {hi:.0f}] Hz")]
+                ax.set_title("(b) FFT (log) — yellow = kurtogram band",
+                             fontsize=12)
+                ax.legend(handles=handles, fontsize=8, loc="upper right")
+            else:
+                ax.text(0.02, 0.95, f"BP [{lo:.0f}, {hi:.0f}] Hz",
+                        transform=ax.transAxes, fontsize=8, va="top",
+                        color="darkgoldenrod",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  facecolor="white", alpha=0.7, lw=0))
             if i == 3:
                 ax.set_xlabel("frequency [Hz]")
 
@@ -145,9 +194,9 @@ def fig03_per_train(endpoints):
             ax.set_yscale("log")
             ax.grid(alpha=0.3)
             ax.set_ylabel("|env spec|")
-            _draw_bpfx_bands(ax, scale)
+            _draw_bpfx_bands(ax, scale_early)
             if i == 0:
-                ax.set_title(f"(c) Envelope — EARLY  (rpm~{rpm_late:.0f})",
+                ax.set_title(f"(c) Envelope — EARLY  (rpm~{rpm_early:.0f})",
                              fontsize=12)
                 ax.legend(handles=_bpfx_legend_handles(),
                           fontsize=8, loc="upper right", ncol=3)
@@ -161,7 +210,7 @@ def fig03_per_train(endpoints):
             ax.set_yscale("log")
             ax.grid(alpha=0.3)
             ax.set_ylabel("|env spec|")
-            _draw_bpfx_bands(ax, scale)
+            _draw_bpfx_bands(ax, scale_late)
             if i == 0:
                 ax.set_title(f"(d) Envelope — LATE  (rpm~{rpm_late:.0f})",
                              fontsize=12)
@@ -178,8 +227,8 @@ def fig03_per_train(endpoints):
 
         fig.suptitle(
             f"Train{tr} — {FAILURE_SIDE[tr]} bearing failure  ·  "
-            f"early(blue) vs late(red)  ·  shaded bands = BPFI/BPFO/BSF at running rpm",
-            fontsize=15, y=1.0,
+            f"pipeline: kurtogram → bandpass (yellow) → Hilbert envelope → BPFI/BPFO/BSF check",
+            fontsize=14, y=1.0,
         )
         fig.tight_layout()
         out = FIG_DIR / f"03_Train{tr}.png"
@@ -188,35 +237,39 @@ def fig03_per_train(endpoints):
         print(f"  saved {out}")
 
 
-def fig04_failure_summary(endpoints):
-    """2 rows (early/late) x 4 cols (Trains) — failure-channel envelope only."""
-    sos = butter(4, [1000.0, 10000.0], btype="band", fs=FS, output="sos")
-    fig, axes = plt.subplots(2, 4, figsize=(22, 9))
+def fig04_failure_summary(endpoints, kurt_bands):
+    """2 rows (early/late) x 4 cols (Trains) — failure-channel envelope only.
 
-    # Need shared y-limits per Train so the early-vs-late jump is visible
+    Each Train's failure channel uses its own kurtogram-derived bandpass.
+    """
+    fig, axes = plt.subplots(2, 4, figsize=(22, 9))
     train_ylim: dict = {}
 
     # First pass: compute spectra and find y-range per Train
     cache: dict = {}
     for tr in TRAIN_IDS:
-        early, late, rpm_late = endpoints[tr]
+        early, late, rpm_early, rpm_late = endpoints[tr]
         ch = FAILURE_CH[tr]
         idx = CH_INDEX[ch]
-        scale = max(rpm_late, 100.0) / 1000.0
+        scale_early = max(rpm_early, 100.0) / 1000.0
+        scale_late  = max(rpm_late,  100.0) / 1000.0
+        lo, hi = kurt_bands[(f"Train{tr}", ch)]
+        sos = _make_sos(lo, hi)
 
         f_e, s_e = _envelope_spec(early[idx], sos)
         f_l, s_l = _envelope_spec(late[idx], sos)
         m = (f_e >= 1) & (f_e <= 500)
 
-        cache[tr] = (f_e[m], s_e[m], s_l[m], scale, ch, rpm_late)
-        # Symmetric log range: pad above max and below 1e-2 of max
+        cache[tr] = (f_e[m], s_e[m], s_l[m],
+                     scale_early, scale_late, ch, rpm_early, rpm_late, lo, hi)
         s_max = max(s_e[m].max(), s_l[m].max())
         s_min = max(min(s_e[m].min(), s_l[m].min()), s_max * 1e-4)
         train_ylim[tr] = (s_min * 0.5, s_max * 2.0)
 
     # Second pass: actual plotting
     for j, tr in enumerate(TRAIN_IDS):
-        f, s_e, s_l, scale, ch, rpm_late = cache[tr]
+        (f, s_e, s_l, scale_early, scale_late,
+         ch, rpm_early, rpm_late, lo, hi) = cache[tr]
         ymin, ymax = train_ylim[tr]
 
         # Top: early
@@ -225,10 +278,11 @@ def fig04_failure_summary(endpoints):
         ax.set_yscale("log")
         ax.set_ylim(ymin, ymax)
         ax.grid(alpha=0.3)
-        _draw_bpfx_bands(ax, scale)
+        _draw_bpfx_bands(ax, scale_early)
         ax.set_title(f"Train{tr}  /  {ch}  (early — first file)\n"
-                     f"{FAILURE_SIDE[tr]} bearing, rpm~{rpm_late:.0f}",
-                     fontsize=11)
+                     f"{FAILURE_SIDE[tr]} bearing, rpm~{rpm_early:.0f}, "
+                     f"BP [{lo:.0f}, {hi:.0f}] Hz",
+                     fontsize=10)
         if j == 0:
             ax.set_ylabel("|env spec| (early)")
             ax.legend(handles=_bpfx_legend_handles() + [
@@ -241,10 +295,11 @@ def fig04_failure_summary(endpoints):
         ax.set_yscale("log")
         ax.set_ylim(ymin, ymax)
         ax.grid(alpha=0.3)
-        _draw_bpfx_bands(ax, scale)
+        _draw_bpfx_bands(ax, scale_late)
         ax.set_xlabel("envelope freq [Hz]")
-        ax.set_title(f"Train{tr}  /  {ch}  (late — last file, EOL)",
-                     fontsize=11)
+        ax.set_title(f"Train{tr}  /  {ch}  (late — last file, EOL,"
+                     f" rpm~{rpm_late:.0f})",
+                     fontsize=10)
         if j == 0:
             ax.set_ylabel("|env spec| (late)")
             ax.legend(handles=_bpfx_legend_handles() + [
@@ -252,10 +307,10 @@ def fig04_failure_summary(endpoints):
                 fontsize=8, loc="upper right", ncol=2)
 
     fig.suptitle(
-        "Failure-channel envelope spectra — top = EARLY (first file), "
-        "bottom = LATE (last file). Y-axis shared per Train. "
-        "Shaded bands = BPFI/BPFO/BSF at running rpm.",
-        fontsize=13, y=1.02,
+        "Failure-channel envelope spectra — pipeline: "
+        "kurtogram-bandpass → Hilbert envelope → BPFI/BPFO/BSF check. "
+        "Y-axis shared per Train; top=EARLY, bottom=LATE.",
+        fontsize=12, y=1.02,
     )
     fig.tight_layout()
     out = FIG_DIR / "04_failure_summary.png"
@@ -265,12 +320,14 @@ def fig04_failure_summary(endpoints):
 
 
 def main():
+    print("Loading kurtogram bands ...")
+    kurt_bands = load_kurtogram_bands()
     print("Loading endpoint TDMS files for all 4 Trains ...")
     endpoints = {tr: get_endpoints(tr) for tr in TRAIN_IDS}
     print("Generating per-Train detail (03_TrainN.png) ...")
-    fig03_per_train(endpoints)
+    fig03_per_train(endpoints, kurt_bands)
     print("Generating failure-channel summary (04_failure_summary.png) ...")
-    fig04_failure_summary(endpoints)
+    fig04_failure_summary(endpoints, kurt_bands)
     print("done.")
 
 
