@@ -1,0 +1,11 @@
+cd "c:/Users/User/WorkSpace/data_challenge" && PYTHONIOENCODING=utf-8 C:/Users/User/anaconda3/python.exe -c "
+import sys; sys.path.insert(0,'.'); import numpy as np, pandas as pd
+from src.scoring import a_rul_score
+v=[53153,51138,13079,35633,14732,14313]  # Test2=B 그대로(51138)
+B=[59351,51138,19936,12168,1800,1800]
+sc=[float(a_rul_score(v[i],B[i])) for i in range(6)]
+print('베어링별 B점수:',[round(s,2) for s in sc])
+print('implied-B =',round(float(np.mean(sc)),3),'(real 0.49)')
+pd.DataFrame([{'File':f'Validation{i+1}','RUL_Score':v[i]} for i in range(6)]).to_excel('outputs/아이사_validation.xlsx',index=False)
+print('wrote:',v)
+" 2>&1 | grep -vi warning

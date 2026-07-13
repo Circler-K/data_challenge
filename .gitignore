@@ -1,6 +1,6 @@
 # Raw challenge data — too large for git, downloaded from KIMM data platform
 Train/
-
+Test/
 # HTML page assets — JS/CSS bundles snapshot, regeneratable from challenge URL
 KSPHM-KIMM 기계 데이터 챌린지 2026_files/
 
@@ -36,3 +36,6 @@ outputs/export_view_run.log
 # Editor
 .vscode/
 .idea/
+/_trash/outputs
+*.pdf
+*.html

@@ -1,0 +1,6 @@
+cd /c/Users/User/WorkSpace/data_challenge && PYTHONIOENCODING=utf-8 /c/Users/User/anaconda3/python.exe scripts/predict_stage_rul.py 2>&1 | grep -v Warning
+
+# 원본 scripts/predict_stage_rul.py 는 결과를 outputs/아이사_validation.xlsx 와
+# outputs/test_rul_stage.csv 에 썼다(라이브 제출파일 위치).
+# 이 폴더의 predict_stage_rul.py 는 동일 로직이며, 출력만 이 폴더 안으로 바꿨다
+# (HERE = 스크립트 폴더). 모델/계산 로직은 한 줄도 바뀌지 않음.
